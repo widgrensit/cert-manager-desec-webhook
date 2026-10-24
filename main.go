@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
@@ -25,6 +27,18 @@ import (
 const (
 	challengeLabel = "_acme-challenge"
 	recordTTL      = 3600
+)
+
+// callTimeout bounds one Present or CleanUp, including the deSEC client's
+// retries, so a throttled call cannot hold the lock indefinitely.
+const callTimeout = 50 * time.Second
+
+var (
+	// challengeName and acmeKey are checked before any API call: the deSEC
+	// client builds URLs with url.JoinPath, which resolves "..", so a name such
+	// as "_acme-challenge.a/../_dmarc" must never reach it.
+	challengeName = regexp.MustCompile(`^_acme-challenge(\.[a-z0-9_-]{1,63})+$`)
+	acmeKey       = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 )
 
 var GroupName = os.Getenv("GROUP_NAME")
@@ -66,13 +80,14 @@ func (c *desecDNSProviderSolver) Initialize(kubeClientConfig *rest.Config, _ <-c
 // there: a leftover record or a concurrent challenge for the same name must not
 // fail issuance.
 func (c *desecDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
 	api, domain, subName, err := c.target(ctx, ch)
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	value := quote(ch.Key)
 
 	existing, err := api.Records.Get(ctx, domain, subName, "TXT")
@@ -99,13 +114,14 @@ func (c *desecDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 
 // CleanUp removes only this challenge's key, and the RRset once it is empty.
 func (c *desecDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
 	api, domain, subName, err := c.target(ctx, ch)
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	value := quote(ch.Key)
 
 	existing, err := api.Records.Get(ctx, domain, subName, "TXT")
@@ -136,8 +152,11 @@ func (c *desecDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 // the webhook write anywhere else in the zone.
 func (c *desecDNSProviderSolver) target(ctx context.Context, ch *v1alpha1.ChallengeRequest) (*desec.Client, string, string, error) {
 	fqdn := strings.ToLower(util.UnFqdn(ch.ResolvedFQDN))
-	if !strings.HasPrefix(fqdn, challengeLabel+".") {
+	if len(fqdn) > 253 || !challengeName.MatchString(fqdn) {
 		return nil, "", "", fmt.Errorf("desec: refusing %q: not an %s name", ch.ResolvedFQDN, challengeLabel)
+	}
+	if !acmeKey.MatchString(ch.Key) {
+		return nil, "", "", errors.New("desec: refusing a malformed challenge key")
 	}
 
 	cfg, err := loadConfig(ch.Config)

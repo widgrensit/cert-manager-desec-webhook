@@ -16,7 +16,8 @@ Changes from upstream:
 - Distroless, non-root image (UID 65532). Run it with `--secure-port=8443`.
 - Images are built in CI, scanned with Trivy, signed with cosign (keyless)
   and published to `ghcr.io/widgrensit/cert-manager-desec-webhook`. Deploy by
-  digest. The latest release is rescanned weekly.
+  digest. A release is pushed once, scanned by digest, and signed only after
+  the scan passes.
 
 ## Configuration
 
@@ -35,7 +36,11 @@ solvers:
             key: token
 ```
 
-Scope the token to `_acme-challenge` TXT records with deSEC token policies.
+deSEC token policies match subnames exactly, with no patterns, so a token
+cannot be limited to `_acme-challenge` names. Grant TXT writes on the zone,
+deny writes to the TXT records that already exist (apex SPF, `_dmarc`, DKIM
+selectors), and restrict `allowed_subnets` to the webhook's egress IP. TXT at
+new names stays writable with the token itself; the webhook refuses them.
 
 Go reads the system trust store unless `SSL_CERT_FILE` and `SSL_CERT_DIR`
 both point at a mounted bundle. Pin them to the roots deSEC chains to.
