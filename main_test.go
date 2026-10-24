@@ -113,6 +113,12 @@ func setup(t *testing.T, rrsets map[string][]string) (*desecDNSProviderSolver, *
 	return &desecDNSProviderSolver{client: client, baseURL: srv.URL + "/api/v1/"}, api
 }
 
+// key pads a short name to the 43-character base64url shape of an ACME
+// DNS-01 key.
+func key(name string) string {
+	return name + strings.Repeat("x", 43-len(name))
+}
+
 func challenge(fqdn, key string) *v1alpha1.ChallengeRequest {
 	return &v1alpha1.ChallengeRequest{
 		ResolvedFQDN:      fqdn,
@@ -124,30 +130,30 @@ func challenge(fqdn, key string) *v1alpha1.ChallengeRequest {
 
 func TestPresentCreatesRRset(t *testing.T) {
 	solver, api := setup(t, map[string][]string{})
-	if err := solver.Present(challenge("_acme-challenge.game.asobi.dev.", "k1")); err != nil {
+	if err := solver.Present(challenge("_acme-challenge.game.asobi.dev.", key("k1"))); err != nil {
 		t.Fatal(err)
 	}
-	if got := api.rrsets["_acme-challenge.game"]; !slices.Equal(got, []string{`"k1"`}) {
+	if got := api.rrsets["_acme-challenge.game"]; !slices.Equal(got, []string{quote(key("k1"))}) {
 		t.Fatalf("records = %v", got)
 	}
 }
 
 func TestPresentKeepsExistingKeys(t *testing.T) {
 	solver, api := setup(t, map[string][]string{"_acme-challenge": {`"other"`}})
-	if err := solver.Present(challenge("_acme-challenge.asobi.dev.", "k1")); err != nil {
+	if err := solver.Present(challenge("_acme-challenge.asobi.dev.", key("k1"))); err != nil {
 		t.Fatal(err)
 	}
-	if got := api.rrsets["_acme-challenge"]; !slices.Equal(got, []string{`"other"`, `"k1"`}) {
+	if got := api.rrsets["_acme-challenge"]; !slices.Equal(got, []string{`"other"`, quote(key("k1"))}) {
 		t.Fatalf("records = %v", got)
 	}
 }
 
 func TestPresentIsIdempotent(t *testing.T) {
-	solver, api := setup(t, map[string][]string{"_acme-challenge": {`"k1"`}})
-	if err := solver.Present(challenge("_acme-challenge.asobi.dev.", "k1")); err != nil {
+	solver, api := setup(t, map[string][]string{"_acme-challenge": {quote(key("k1"))}})
+	if err := solver.Present(challenge("_acme-challenge.asobi.dev.", key("k1"))); err != nil {
 		t.Fatal(err)
 	}
-	if got := api.rrsets["_acme-challenge"]; !slices.Equal(got, []string{`"k1"`}) {
+	if got := api.rrsets["_acme-challenge"]; !slices.Equal(got, []string{quote(key("k1"))}) {
 		t.Fatalf("records = %v", got)
 	}
 	for _, call := range api.calls {
@@ -157,9 +163,41 @@ func TestPresentIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestConcurrentChallengesKeepEveryKey(t *testing.T) {
+	solver, api := setup(t, map[string][]string{})
+	keys := []string{"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"}
+	var wg sync.WaitGroup
+	for _, k := range keys {
+		wg.Go(func() {
+			if err := solver.Present(challenge("_acme-challenge.asobi.dev.", key(k))); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	got := slices.Sorted(slices.Values(api.rrsets["_acme-challenge"]))
+	want := []string{quote(key("k1")), quote(key("k2")), quote(key("k3")), quote(key("k4")), quote(key("k5")), quote(key("k6")), quote(key("k7")), quote(key("k8"))}
+	if !slices.Equal(got, want) {
+		t.Fatalf("records = %v", got)
+	}
+
+	for _, k := range keys[:4] {
+		wg.Go(func() {
+			if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", key(k))); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	got = slices.Sorted(slices.Values(api.rrsets["_acme-challenge"]))
+	if !slices.Equal(got, want[4:]) {
+		t.Fatalf("after cleanup records = %v", got)
+	}
+}
+
 func TestCleanUpRemovesOnlyOwnKey(t *testing.T) {
-	solver, api := setup(t, map[string][]string{"_acme-challenge": {`"other"`, `"k1"`}})
-	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", "k1")); err != nil {
+	solver, api := setup(t, map[string][]string{"_acme-challenge": {`"other"`, quote(key("k1"))}})
+	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", key("k1"))); err != nil {
 		t.Fatal(err)
 	}
 	if got := api.rrsets["_acme-challenge"]; !slices.Equal(got, []string{`"other"`}) {
@@ -168,8 +206,8 @@ func TestCleanUpRemovesOnlyOwnKey(t *testing.T) {
 }
 
 func TestCleanUpDeletesEmptyRRset(t *testing.T) {
-	solver, api := setup(t, map[string][]string{"_acme-challenge": {`"k1"`}})
-	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", "k1")); err != nil {
+	solver, api := setup(t, map[string][]string{"_acme-challenge": {quote(key("k1"))}})
+	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", key("k1"))); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := api.rrsets["_acme-challenge"]; ok {
@@ -179,14 +217,14 @@ func TestCleanUpDeletesEmptyRRset(t *testing.T) {
 
 func TestCleanUpToleratesMissing(t *testing.T) {
 	solver, _ := setup(t, map[string][]string{})
-	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", "k1")); err != nil {
+	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", key("k1"))); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestCleanUpLeavesOtherKeysAlone(t *testing.T) {
 	solver, api := setup(t, map[string][]string{"_acme-challenge": {`"other"`}})
-	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", "k1")); err != nil {
+	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", key("k1"))); err != nil {
 		t.Fatal(err)
 	}
 	if got := api.rrsets["_acme-challenge"]; !slices.Equal(got, []string{`"other"`}) {
@@ -195,16 +233,33 @@ func TestCleanUpLeavesOtherKeysAlone(t *testing.T) {
 }
 
 func TestRefusesNonChallengeNames(t *testing.T) {
-	for _, fqdn := range []string{"asobi.dev.", "www.asobi.dev.", "x._acme-challenge.asobi.dev.", "_acme-challenge.example.com."} {
-		solver, api := setup(t, map[string][]string{})
-		if err := solver.Present(challenge(fqdn, "k1")); err == nil {
+	for _, fqdn := range []string{
+		"asobi.dev.", "www.asobi.dev.", "x._acme-challenge.asobi.dev.", "_acme-challenge.example.com.",
+		"_acme-challenge.a/../_dmarc.asobi.dev.", "_acme-challenge.a/../@.asobi.dev.",
+		"_acme-challenge..asobi.dev.", "_acme-challenge.a%2f..%2f_dmarc.asobi.dev.",
+	} {
+		solver, api := setup(t, map[string][]string{"_dmarc": {`"v=DMARC1; p=reject"`}})
+		if err := solver.Present(challenge(fqdn, key("k1"))); err == nil {
 			t.Errorf("%s: Present succeeded", fqdn)
 		}
-		if err := solver.CleanUp(challenge(fqdn, "k1")); err == nil {
+		if err := solver.CleanUp(challenge(fqdn, key("k1"))); err == nil {
 			t.Errorf("%s: CleanUp succeeded", fqdn)
 		}
-		if len(api.rrsets) != 0 {
-			t.Errorf("%s: wrote %v", fqdn, api.rrsets)
+		reachedRRsets := slices.ContainsFunc(api.calls, func(c string) bool { return strings.Contains(c, "/rrsets/") })
+		if reachedRRsets || !slices.Equal(api.rrsets["_dmarc"], []string{`"v=DMARC1; p=reject"`}) {
+			t.Errorf("%s: called %v, rrsets %v", fqdn, api.calls, api.rrsets)
+		}
+	}
+}
+
+func TestRefusesMalformedKeys(t *testing.T) {
+	for _, k := range []string{"", "k1", key("k1") + "x", `"` + key("k1")[1:], key("k1")[1:] + "/"} {
+		solver, api := setup(t, map[string][]string{})
+		if err := solver.Present(challenge("_acme-challenge.asobi.dev.", k)); err == nil {
+			t.Errorf("%q: Present succeeded", k)
+		}
+		if len(api.calls) != 0 {
+			t.Errorf("%q: called deSEC %v", k, api.calls)
 		}
 	}
 }
@@ -220,7 +275,7 @@ func TestConfigErrors(t *testing.T) {
 	}
 	for name, cfg := range cases {
 		solver, api := setup(t, map[string][]string{})
-		ch := challenge("_acme-challenge.asobi.dev.", "k1")
+		ch := challenge("_acme-challenge.asobi.dev.", key("k1"))
 		ch.Config = cfg
 		if err := solver.Present(ch); err == nil {
 			t.Errorf("%s: Present succeeded", name)
@@ -237,7 +292,7 @@ func TestAPIErrorsSurface(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "desec-token", Namespace: namespace},
 		Data:       map[string][]byte{"token": []byte("revoked")},
 	})
-	if err := solver.Present(challenge("_acme-challenge.asobi.dev.", "k1")); err == nil {
+	if err := solver.Present(challenge("_acme-challenge.asobi.dev.", key("k1"))); err == nil {
 		t.Fatal("Present succeeded with a rejected token")
 	}
 }
