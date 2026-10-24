@@ -16,8 +16,8 @@ Changes from upstream:
 - Distroless, non-root image (UID 65532). Run it with `--secure-port=8443`.
 - Images are built in CI, scanned with Trivy, signed with cosign (keyless)
   and published to `ghcr.io/widgrensit/cert-manager-desec-webhook`. Deploy by
-  digest. A release is pushed once, scanned by digest, and signed only after
-  the scan passes.
+  digest. A release is pushed by digest, scanned, signed, and only then given
+  its version tag.
 
 ## Configuration
 
