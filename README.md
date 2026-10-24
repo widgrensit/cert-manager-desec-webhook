@@ -10,12 +10,13 @@ Changes from upstream:
   deSEC API is called.
 - `Present` adds its key to the TXT RRset instead of replacing it, so
   concurrent challenges for the same name (a wildcard and its apex) do not
-  overwrite each other. `CleanUp` removes only its own key.
+  overwrite each other. `CleanUp` removes only its own key. Both run under one
+  lock, so the webhook must run as a single replica.
 - Current Go, cert-manager and Kubernetes libraries.
 - Distroless, non-root image (UID 65532). Run it with `--secure-port=8443`.
 - Images are built in CI, scanned with Trivy, signed with cosign (keyless)
   and published to `ghcr.io/widgrensit/cert-manager-desec-webhook`. Deploy by
-  digest.
+  digest. The latest release is rescanned weekly.
 
 ## Configuration
 
@@ -43,7 +44,7 @@ both point at a mounted bundle. Pin them to the roots deSEC chains to.
 
 ```shell
 cosign verify ghcr.io/widgrensit/cert-manager-desec-webhook@sha256:<digest> \
-  --certificate-identity-regexp '^https://github.com/widgrensit/cert-manager-desec-webhook/' \
+  --certificate-identity https://github.com/widgrensit/cert-manager-desec-webhook/.github/workflows/ci.yml@refs/tags/v<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 

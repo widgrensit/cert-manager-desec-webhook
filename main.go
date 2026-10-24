@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
@@ -39,6 +40,9 @@ type desecDNSProviderSolver struct {
 	client kubernetes.Interface
 	// baseURL overrides the deSEC API endpoint; tests point it at a fake.
 	baseURL string
+	// mu serialises the read-modify-write of RRsets, so two challenges for the
+	// same name cannot drop each other's key. The webhook runs one replica.
+	mu sync.Mutex
 }
 
 type desecDNSProviderConfig struct {
@@ -62,6 +66,8 @@ func (c *desecDNSProviderSolver) Initialize(kubeClientConfig *rest.Config, _ <-c
 // there: a leftover record or a concurrent challenge for the same name must not
 // fail issuance.
 func (c *desecDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ctx := context.Background()
 	api, domain, subName, err := c.target(ctx, ch)
 	if err != nil {
@@ -93,6 +99,8 @@ func (c *desecDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 
 // CleanUp removes only this challenge's key, and the RRset once it is empty.
 func (c *desecDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ctx := context.Background()
 	api, domain, subName, err := c.target(ctx, ch)
 	if err != nil {

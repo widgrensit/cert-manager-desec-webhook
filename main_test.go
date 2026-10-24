@@ -157,6 +157,38 @@ func TestPresentIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestConcurrentChallengesKeepEveryKey(t *testing.T) {
+	solver, api := setup(t, map[string][]string{})
+	keys := []string{"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"}
+	var wg sync.WaitGroup
+	for _, k := range keys {
+		wg.Go(func() {
+			if err := solver.Present(challenge("_acme-challenge.asobi.dev.", k)); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	got := slices.Sorted(slices.Values(api.rrsets["_acme-challenge"]))
+	want := []string{`"k1"`, `"k2"`, `"k3"`, `"k4"`, `"k5"`, `"k6"`, `"k7"`, `"k8"`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("records = %v", got)
+	}
+
+	for _, k := range keys[:4] {
+		wg.Go(func() {
+			if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", k)); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	got = slices.Sorted(slices.Values(api.rrsets["_acme-challenge"]))
+	if !slices.Equal(got, want[4:]) {
+		t.Fatalf("after cleanup records = %v", got)
+	}
+}
+
 func TestCleanUpRemovesOnlyOwnKey(t *testing.T) {
 	solver, api := setup(t, map[string][]string{"_acme-challenge": {`"other"`, `"k1"`}})
 	if err := solver.CleanUp(challenge("_acme-challenge.asobi.dev.", "k1")); err != nil {
