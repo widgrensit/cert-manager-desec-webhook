@@ -1,24 +1,13 @@
-FROM golang:1.22-alpine3.19 AS build_deps
-
-RUN apk add --no-cache git
+FROM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS build
 
 WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+COPY *.go ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /webhook .
 
-COPY go.mod .
-COPY go.sum .
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 
-RUN go mod download
-
-FROM build_deps AS build
-
-COPY . .
-
-RUN CGO_ENABLED=0 go build -o webhook -ldflags '-w -extldflags "-static"' .
-
-FROM alpine:3.18
-
-RUN apk add --no-cache ca-certificates
-
-COPY --from=build /workspace/webhook /usr/local/bin/webhook
-
-ENTRYPOINT ["webhook"]
+COPY --from=build /webhook /webhook
+USER 65532:65532
+ENTRYPOINT ["/webhook"]

@@ -1,149 +1,59 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/cert-manager/cert-manager/d53c0b9270f8cd90d908460d69502694e1838f5f/logo/logo-small.png" height="256" width="256" alt="cert-manager project logo" />
-</p>
+# cert-manager deSEC webhook
 
-# ACME webhook for desec.io DNS API
+A cert-manager DNS-01 solver for [deSEC](https://desec.io). Fork of
+[su541/cert-manager-desec-webhook](https://github.com/su541/cert-manager-desec-webhook)
+at v1.0.1, maintained for asobi.dev.
 
-This solver can be used with [desec.io](https://desec.io) DNS API. The documentation
-of the API can be found [here](https://desec.readthedocs.io/en/latest/)
+Changes from upstream:
 
-## Requirements
-- [go](https://golang.org) => 1.22.0
-- [helm](https://helm.sh/) >= v3.0.0
-- [kuberentes](https://kubernetes.io/) => 1.25.0
-- [cert-manager](https://cert-managaer.io/) => 1.15.1
+- Writes only `_acme-challenge` names. Any other FQDN is refused before the
+  deSEC API is called.
+- `Present` adds its key to the TXT RRset instead of replacing it, so
+  concurrent challenges for the same name (a wildcard and its apex) do not
+  overwrite each other. `CleanUp` removes only its own key.
+- Current Go, cert-manager and Kubernetes libraries.
+- Distroless, non-root image (UID 65532). Run it with `--secure-port=8443`.
+- Images are built in CI, scanned with Trivy, signed with cosign (keyless)
+  and published to `ghcr.io/widgrensit/cert-manager-desec-webhook`. Deploy by
+  digest.
 
-## Installation
+## Configuration
 
-### Using helm from local checkout
-```bash
-helm install desec-webhook -n cert-manager deploy/desec-webhook
-```
-### Using public helm chart
+Set `GROUP_NAME` on the webhook and reference a Secret holding the deSEC token
+from the issuer:
 
-
-## Uninstallation
-
-## Creating an issuer
-
-Create a secret containing the credentials
 ```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: desec-io-token
-  namespace: cert-manager
-type: Opaque
-data:
-  token: your-key-base64-encoded
+solvers:
+  - dns01:
+      webhook:
+        groupName: <GROUP_NAME>
+        solverName: desec
+        config:
+          apiKeySecretRef:
+            name: desec-io-token
+            key: token
 ```
+
+Scope the token to `_acme-challenge` TXT records with deSEC token policies.
+
+Go reads the system trust store unless `SSL_CERT_FILE` and `SSL_CERT_DIR`
+both point at a mounted bundle. Pin them to the roots deSEC chains to.
+
+## Verifying an image
 
 ```shell
-kubectl create secret generic desec-io-token --from-literal "token=<your token>" --namespace cert-manager
+cosign verify ghcr.io/widgrensit/cert-manager-desec-webhook@sha256:<digest> \
+  --certificate-identity-regexp '^https://github.com/widgrensit/cert-manager-desec-webhook/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-We can also then provide a standardised 'testing framework', or set of
-conformance tests, which allow us to validate that a DNS provider works as
-expected.
-Create a 'ClusterIssuer' or 'Issuer' resource as the following:
+## Development
 
-```yaml
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-staging
-spec:
-  acme:
-    server: https://acme-staging-v02.api.letsencrypt.org/directory
-    email: mail@example.com
-
-    privateKeySecretRef:
-      name: letsencrypt-staging
-
-    solvers:
-      - dns01:
-          webhook:
-            config:
-              apiKeySecretRef:
-                key: token
-                name: desec-io-token
-            groupName: de.su541.acme
-            solverName: desec
+```shell
+make vet test
+make build
 ```
 
-## Create a manual certificate
+## Licence
 
-```yaml
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: example-cert
-  namespace: cert-manager
-spec:
-  commonName: example.com
-  dnsNames:
-    - example.com
-  issuerRef:
-    name: letsencrypt-staging
-    kind: ClusterIssuer
-  secretName: example-cert
-```
-
-## Using cert-manager with traefik ingress
-```yaml
-
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: bitwarden
-  namespace: utils
-  labels:
-    app: bitwarden
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-staging
-    kubernetes.io/ingress.class: traefik
-    traefik.ingress.kubernetes.io/rewrite-target: /$1
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.tls: 'true'
-spec:
-  tls:
-    - hosts:
-        - bitwarden.acme.example.com
-      secretName: bitwarden-crt
-  rules:
-    - host: bitwarden.acme.example.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: bitwarden
-                port:
-                  number: 80
-
-```
-
-### Creating your own repository
-
-### Running the test suite
-
-All DNS providers **must** run the DNS01 provider conformance testing suite,
-else they will have undetermined behaviour when used with cert-manager.
-
-Provide a secret.yaml in testdata/desec
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: desec-token
-data:
-  token: your-key-base64-encoded
-type: Opaque
-```
-
-Define a **TEST_ZONE_NAME** matching to your authenticaton creditials.
-
-```bash
-$ TEST_ZONE_NAME=example.com. make test
-```
+MPL-2.0, as upstream. See [LICENSE](LICENSE).
